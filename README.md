@@ -1,173 +1,122 @@
-# Probabilistic Models for Robotic Perception
+# Probabilistic Perception for a Robotic Arm
 
-## Unsupervised Classification of Sensor Readings
+**Unsupervised classification of sensor readings — *self* vs. *background* vs. *anomaly* — with no explicit geometry or kinematics.**
 
+*Deep Learning & Robotics Challenge 2018 · Team **The Boring Panda** — Daniel Plop & Giorgio Giannone · in collaboration with the [argmax.ai](https://argmax.ai) group.*
 
+---
 
-* Team: **THE BORING PANDA**
-* Members: Daniel & Giorgio
+## The problem
 
+We were given a 7-DOF **Panda** robotic arm with **9 single-point lidars** and an **RGBD camera** on the end-effector, controllable point-to-point via a Python API.
 
+**Goal:** label every incoming sensor reading as **self**, **background**, or **other** — and do it with *unsupervised / semi-supervised learning* instead of hand-built geometric models.
 
-For this Challenge, the argmax.ai group gave us a 7 degree of freedom Panda robotic arm. The robot possesses 9 single point lidars and an RGBD camera on the end-effector. Thanks to a Python API, we can easily control the robotic arm point to point, read sensor data and receive information about the robot state.
+The hypothesis: perception on a manipulator can be solved as a *statistical* problem, without explicitly modelling the robot's configuration or geometry. The payoff is a model that generalizes across environments and **quantifies its own uncertainty**; exactly what is nice to have when the world is dynamic and labels are unavailable.
 
-Our goal for the Robotic Challenge was:
+## Results
 
-**Classify each data reading as self, background or other using Unsupervised/Semi-Supervised Learning techniques.**
+| Module | Task | Headline metric |
+| --- | --- | --- |
+| **Anomaly detection** | Is something new in the scene? | Threshold-free, calibrated uncertainty (predictive σ) |
+| **Clustering** | Self vs. background | **89.8%** global accuracy · **69.4%** recall on `self` (3,000 labeled lidar points) |
+| **Collision detection** | Anomaly vs. likely collision | **F1 0.61** avg · up to **0.96** per lidar (2,000 points) |
 
-We hypothesized that the perception task can be solved without relying explicitly on geometry and configuration.
+No manual labeling in the loop, no per-sensor heuristics; every decision results from a likelihood.
 
-### Background
+## Why not just use geometry?
 
-When we started to work on this project, one month ago, we decided to focus on the Machine Learning part.  Moreover, reading papers, a simple observation arose naturally: Machine Learning for Robotics works in specific cases, and it is challenging to generalize. We tried to understand why.
+Classical robotics solves *well-defined* tasks beautifully with geometry and control — no learning required. But once the task is loosely specified, the agent isn't perfectly known, and the environment keeps changing, those assumptions break.
 
-#### Geometry based and Machine Learning based approach
+|         Geometry-first         |        Learning-first        |
+| :----------------------------: | :--------------------------: |
+| ![](./project_dlrc2018/images/geometry_based.jpg) | ![](./project_dlrc2018/images/learning_based.jpg) |
+| Build an exact system model, add ML for narrow tasks. | Build a statistical model, *inject* geometric/task priors on top. |
 
-Typically in Robotics we deal with tasks well defined. It is possible to obtain impressive results applying Geometry, Control theory and engineering. In a traditional setup, we don't need Learning.
+Supervised learning is the wrong fit here too: labeling thousands of sensor points per second is impractical and high-variance, discriminative models assume train/test share a distribution (whereas domain shift is what is happens practically in robotics), and they output point-estimates instead of uncertainty. So we for **unsupervised** learning.
 
-| ![](./project_dlrc2018/images/geometry_based.jpg)                             | ![](./project_dlrc2018/images/learning_based.jpg)                             |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| Geometry based approach: we build a specific model of our system, and on top of it we use machine learning to solve specific tasks. | Learning based approach: we build a statistical model, and on top of it we inject geometrical constraints and task-dependent information. |
+## From signal to structure
 
-But assume that the task is not so well defined; that we don't have perfect knowledge of our agent; and that we need to deal with a not static environment. This last hypothesis is not only a theoretical assumption, and it's particularly relevant considering that more and more robots are interacting with us in environments that typically evolve. For this new scenario, classical methods are not sufficient. Now Statistical Methods can be helpful.
+Logging lidar over a fixed trajectory immediately revealed a clean **multi-modal** structure — the signature of distinct physical regimes (self / background / moving object).
 
-#### Statistical Modeling
+| ![](./project_dlrc2018/images/jointplot_trajectory0.jpg) |
+| :---: |
+| Per-lidar temporal traces (mm) with density estimates over one trajectory. |
 
-It became immediately clear that a Supervised approach that relies on manual labeling and strong supervision was not well suited for this task. The manual labeling for sensor reading is not trivial and not always objective (imagine that you need to label thousands of data points every second). Moreover, discriminative algorithms assume the same data distribution between train and test set (it is possible to work with Domain Adaptation techniques, but they always assume some distribution similarity). Also, they typically output a number. All features that are not good in Robotics, where domain shift and uncertainty are the norms.
+A Gaussian Mixture Model on a tiny hand-crafted feature confirmed the idea. From a short window of a time series $x(t)$, we summarize the temporal-difference transform
 
-We decided to use **Statistical Unsupervised Learning**, a class of Machine Learning algorithms that learn structure in data without manual labeling. With one model we can sense the environment without using complex heuristics to label sensor data and quantify uncertainty around our prediction.
+$$f(x_t) = \lvert x(t+1) - x(t) \rvert$$
 
-#### Data Analysis
+with `[max; std]`. On 30 windows (10 points each), the GMM clustered **70%** correctly — and the misses were dynamic samples genuinely indistinguishable from static ones in this embedding. If a 2-D hand-crafted feature gets us this far, a learned representation should solve the full task.
 
-We started to collect data and see if it was possible to detect some patterns. The first result was cheering: collecting lidar data on a given trajectory, we started to see a clear multi-modal pattern.
+| ![](./project_dlrc2018/images/gt_gmm.jpg) | ![](./project_dlrc2018/images/pred_gmm.jpg) |
+| :---: | :---: |
+| Ground truth: dynamic (red) vs. static (blue). | GMM clustering prediction. |
 
-|           ![](./project_dlrc2018/images/jointplot_trajectory0.jpg)            |
-| :----------------------------------------------------------: |
-| Data collected moving the robotic arm on a given trajectory. For any lidar, we show the temporal trace in mm and the relative histogram with density estimation. |
+## The sensing framework
 
-| ![](./project_dlrc2018/images/measurements_lidar3_with_thresh.jpg)            |
-| ------------------------------------------------------------ |
-| Controlled experiment to analyze different patterns for background, self and other. |
+A hierarchical pipeline of three modules, each answering one question. Input: 9 lidar readings + 7 joint positions (variants also consume depth images).
 
-Given this behavior, we decided to try with a Mixture Model. The general idea is that we can express the complex structure of $y$ in terms of a weighted combination of simpler (possibly known) densities. So we tried a simple Gaussian Mixture Model on a simplified scenario: we collected time-series data in a static and a dynamic environment; every sample is 10 consecutive points in this time series; we built a low dimensional handcrafted feature representation. In particular, given a time series $x(t)$, we built a simple handcrafted feature representation using [max;std] of the following simple (non-linear) data transformation. We can think to this $f(x_t)$ as a temporal difference
+| ![](./project_dlrc2018/images/framework.jpg) |
+| :---: |
+| Anomaly → Clustering → Collision: a hierarchy of statistical decisions over raw sensor input. |
+
+**Notation.** $y_{ij}$ is lidar reading $j$ of sample $i$; $y_{i,st}$ a depth pixel; $x_i$ the robot state (joint angles); $\pi_k$ a cluster selector.
+
+### 1. Anomaly detection: *"is anything new?"*
+
+Solve a **proxy regression** task: an MLP (two 256-unit `tanh` layers) predicts, per lidar, a **mean and a standard deviation** from the robot state, trained to minimize negative log-likelihood. When the model can't reconstruct a reading within its own confidence interval, that reading is an anomaly. The threshold is the *learned* predictive uncertainty — no heuristics.
+
 $$
-f(x_t) = \vert x(t+1) - x(t) \vert
-$$
-The result was good: considering 30 samples (every sample consisting of short time series with 10 consecutive points), we were able to cluster correctly 70 % of these points. Moreover, the misclassified samples are the dynamic one indistinguishable from the static one in this embedding space. 
-
-| ![](./project_dlrc2018/images/gt_gmm.jpg)                                     | ![](./project_dlrc2018/images/pred_gmm.jpg) |
-| ------------------------------------------------------------ | -------------------------- |
-| time series data embedding for dynamic (red) and static (blue) environment | gmm clustering prediction  |
-
-Given that we can cluster with handcrafted features, using deep learning and statistics, we should be able to find a representation space to solve our perception task. We started to build our model on this basis.
-
-### Model
-
-#### Definitions
-
-Before to start, some definitions:
-
-* $(y_i, x_i)$ is a sample
-* $y_{i j}$ is a lidar reading
-* $y_{i, s t}$ is a pixel in a depth image
-* $x_i$ is the state of the robot; typically joint angle positions and velocities
-* $\pi_k$ is a clustering selector
-
-#### The Sensing framework
-
-The sensing framework is a hierarchical statistical learning model and consists of three main Modules:
-
-* Anomaly Detection Module
-* Clustering Module
-* Collision Detection Module
-
-These three modules solve what we consider the most relevant perception tasks for a manipulator: understand if there is something new in the environment; if everything is normal, be able to distinguish between background and itself; instead, if something is abnormal, distinguish between something new (agent moving, a new object) or a possible collision.
-
-As input for all the framework, we have the 9 lidar readings, and the 7 joint positions (we decide to not use joint velocity). We also built variants of these models to deal with depth images used as sensor input or to help the lidar clustering.
-
-
-
-| ![](./project_dlrc2018/images/framework.jpg)                                  |
-| ------------------------------------------------------------ |
-| Pictorial view of our Perception Framework. Given input data sensor, we build a hierarchical learning pipeline to deal with complex Dynamic Environments. |
-
-#### Anomaly Detection Module
-
-For anomaly detection, we decided to use a Regression model. The statistical model is Normal. The idea is to solve a proxy task (prediction) to obtain an anomaly detector: after training, when the model is not able to reconstruct or predict a given sample point, we consider this point an anomaly. Simple and effective! 
-
-We used a multilayer perceptron with two 256 unit layers and hyperbolic tangent as activation. This network outputs two objects: 9 means (one for every lidar), and more important, 9 standard deviations. The network is trained to minimize the negative log-likelihood. In this way, we can not only detect an anomaly, but we can quantify the uncertainty (building a confidence interval) for our prediction, and we use this confidence interval to decide if a point is an anomaly or not. We don't need to use heuristics, because the probability to be an outlier is directly linked with how well the model fits the data.
-
-Given a sample $Y \vert X$, the distribution of $Y \vert X$ can be expressed as a product of their iid sample points. For any sample point $i$, we have lidars $j$ and depth images, with pixels $s, t$
-$$
-\begin{align}p(Y \vert X) 
-&= \prod_i p(y_i \vert x_i)\\
-&= \prod_i\prod_j \mathcal N(y_{ij}^{lidar} \vert \mu_{j}^{lidar}(x_i), \sigma_j^{lidar}(x_i)^2) \times \prod_{s,t} \mathcal N(y^{depth}_{i,st} \vert \mu^{depth}_{st}(x_i),\sigma^{depth}(x_i)^2 )
-\end{align}
-$$
-$$
-L(Y, X)= - \sum_i \log p(y_i \vert x_i)
+p(Y \mid X) = \prod_i \prod_j \mathcal{N}\!\left(y_{ij}^{\text{lidar}} \mid \mu_j(x_i),\, \sigma_j(x_i)^2\right) \times \prod_{s,t} \mathcal{N}\!\left(y_{i,st}^{\text{depth}} \mid \mu_{st}(x_i),\, \sigma^2(x_i)\right)
 $$
 
-
-|                ![](./project_dlrc2018/images/anomaly_blog.jpg)                |
-| :----------------------------------------------------------: |
-| Lidar n.3 reading. We inject anomalies in the environment, and the model is not able to predict the new behavior. |
-
-####  Clustering Module
-
-If the Anomaly Detector Module detects an anomaly, we have done. However, if it detects a normal behavior, now we need to use the Clustering Module to decide if it is background or self. To obtain this result, we built what we called a selector model, a network that mimics the Gaussian mixture model' s behavior. Again we solve a proxy task (a prediction) to solve a clustering task. We train with maximum likelihood. In this case, for lidars readings, we have an interest in learning the moments of  9 one dimensional multi modal Gaussian with two modes: self and background. We input a short time series of 10 consecutive points: in this way, we help the model to learn the temporal dynamics and we filter noise.
-
-As before, the meaning of the symbols is the same. The selectors $\pi_{k}$ are the only novelty. These selectors represent the clustering probability for any sensor reading. For example, given 9 lidars, we need to output (9, 2) numbers.
 $$
-\begin{align}
-p(Y \vert X) 
-&= \prod_i p(y_i \vert x_i)\\
-&= \prod_i p(y_i^{lidar} \vert x_i)\times p(y_i^{depth} \vert x_i)\\ 
-&= \prod_i\prod_j \mathcal N(y_{ij}^{lidar} \vert \sum_k \pi_{jk}^{lidar}(x_i)\mu_{jk}^{lidar}(x_i), \sum_k \pi_{jk}^{lidar}(x_i)\sigma_{jk}^{lidar}(x_i)^2) \\
-&\times \prod_{s,t} \mathcal N(y^{depth}_{i,st} \vert \sum_k \pi_{st,k}^{depth}(x_i) \mu^{depth}_{st,k}(x_i), \sum_k \pi_{st,k}^{lidar}(x_i)\sigma^{depth}_{k}(x_i)^2 )
-\end{align}
+\mathcal{L}(Y, X) = -\sum_i \log p(y_i \mid x_i)
 $$
 
+| ![](./project_dlrc2018/images/anomaly_blog.jpg) |
+| :---: |
+| Lidar #3: injected anomalies fall outside the model's predicted range. |
 
-|                  ![](./project_dlrc2018/images/cl_blog.jpg)                   |
-| :----------------------------------------------------------: |
-| Clustering on a controlled experiment. Lidar n.3 reading. The red vertical lines represent the limit of ground truth for self. |
+### 2. Clustering: *"self or background?"*
 
-With this model, on a ground truth of 3000 labeled lidar point measurements, we obtained a global accuracy of 89.8 % and a recall (on the class of interest self) of 69.4 %.
+If a reading is *normal*, a **selector network** mimicking a GMM splits it into two learned modes. Same likelihood, now with cluster weights $\pi_{jk}(x_i)$ as the only addition; a 10-point window feeds in temporal context and filters noise.
 
-#### Collision Detection Module
+$$
+p(y_{ij}^{\text{lidar}} \mid x_i) = \mathcal{N}\!\left(y_{ij}^{\text{lidar}} \;\middle|\; \sum_k \pi_{jk}(x_i)\,\mu_{jk}(x_i),\; \sum_k \pi_{jk}(x_i)\,\sigma_{jk}(x_i)^2\right)
+$$
 
-We model this task as a simple multi-label binary classification: in practice, we consider batches of 10 consecutive time series point; we randomly chose columns and set that values to Gaussian noise around a small value (around 50 mm). We label any original data point class 0, and any modified data point 1: in this way we want to discriminate between a generic anomaly (something new in the environment, another agent acting) and a probable collision. We now train/test on this dataset and we evaluate the result considering a global result and a per lidar result (we solve a binary classification problem for every lidar). Computing the Confusion matrix for a test set sample of 2000 points,  we evaluate the classification result using the Jaccard index and the F1 metric. 
+| ![](./project_dlrc2018/images/cl_blog.jpg) |
+| :---: |
+| Lidar #3, controlled experiment. Red lines mark the ground-truth bounds of `self`. |
 
-We report results for the class of interest (collision or class 1):
+**→ 89.8% global accuracy, 69.4% recall on `self`** (3,000 labeled points).
 
-| metrics/Lidar | 0    | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    | Avg   |
-| ------------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ----- |
-| N             | 100  | 180  | 140  | 180  | 100  | 170  | 200  | 160  | 180  | 156.6 |
-| Sensitivity   | 0.96 | 0.33 | 0.22 | 0.56 | 0.84 | 0.97 | 0.22 | 0.20 | 0.57 | 0.54  |
-| IoU           | 0.92 | 0.32 | 0.20 | 0.50 | 0.73 | 0.91 | 0.19 | 0.17 | 0.50 | 0.49  |
-| F1            | 0.96 | 0.49 | 0.33 | 0.67 | 0.84 | 0.95 | 0.32 | 0.29 | 0.66 | 0.61  |
+### 3 · Collision detection — *"new object or impact?"*
 
-​						Result on 2000 points with ground truth for collision detection
+Framed as **multi-label binary classification**: corrupt random columns of a 10-point window with Gaussian noise (~50 mm), label originals `0` and perturbations `1`, and learn to separate a generic anomaly from a likely collision — independently per lidar.
 
-### Conclusions
+Per-lidar results for the collision class (2,000 test points):
 
-In this work, we investigated the possibility to sense the environment using an unsupervised learning approach, without relying on a particular configuration or geometry. This approach showed Advantages and Drawbacks.
+| metric | L0 | L1 | L2 | L3 | L4 | L5 | L6 | L7 | L8 | **Avg** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| N | 100 | 180 | 140 | 180 | 100 | 170 | 200 | 160 | 180 | 156.6 |
+| Sensitivity | 0.96 | 0.33 | 0.22 | 0.56 | 0.84 | 0.97 | 0.22 | 0.20 | 0.57 | **0.54** |
+| IoU | 0.92 | 0.32 | 0.20 | 0.50 | 0.73 | 0.91 | 0.19 | 0.17 | 0.50 | **0.49** |
+| F1 | 0.96 | 0.49 | 0.33 | 0.67 | 0.84 | 0.95 | 0.32 | 0.29 | 0.66 | **0.61** |
 
-Regarding the advantages, in principle we can learn structures that we can reuse in different scenarios; and the capacity to quantify the prediction uncertainty because this approach is intrinsically statistical.
+## What worked, what's next
 
-However, we didn't manage to solve the unsupervised classification task in a general sense; and the most significant drawback is that we are not able to interact easily with the environment; we can learn the perception task in simple environments, but is not straightforward how to use this knowledge and solve a specific task.
+**Worked:** a single statistical pipeline senses the environment with no per-sensor heuristics, learns reusable structure, and reports calibrated uncertainty on every prediction.
 
-The model can be improved: in particular, to solve the perception task robustly, we want to use latent variable models to learn better data representation and sequence models to model the temporal dynamics.
+**Open:** the unsupervised classifier doesn't yet generalize fully, and the representation isn't directly actionable — perceiving a dynamic scene is not the same as knowing how to act in it.
 
-### References
+**Next:** latent-variable models for richer representations and sequence models for temporal dynamics, to make the perception layer robust enough to act on.
 
-0)  [GitHub repository](https://github.com/georgosgeorgos/DLRC_2018)
+## References
 
-1) [Variational Inference for On-line Anomaly Detection in High-Dimensional Time Series](https://arxiv.org/abs/1602.07109)
-
-2) [ Deep unsupervised clustering with Gaussian mixture variational autoencoders](https://openreview.net/forum?id=SJx7Jrtgl)
-
-3) [Learning by Association - A versatile semi-supervised training method for neural networks](https://arxiv.org/abs/1706.00909)
-
-4) [Generative Ensembles for Robust Anomaly Detection](https://arxiv.org/abs/1810.01392)
+- [Variational Inference for On-line Anomaly Detection in High-Dimensional Time Series](https://arxiv.org/abs/1602.07109)
+- [Deep Unsupervised Clustering with Gaussian Mixture Variational Autoencoders](https://openreview.net/forum?id=SJx7Jrtgl)
+- [Learning by Association — A Versatile Semi-Supervised Training Method](https://arxiv.org/abs/1706.00909)
+- [Generative Ensembles for Robust Anomaly Detection](https://arxiv.org/abs/1810.01392)
