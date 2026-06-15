@@ -45,7 +45,9 @@ Logging lidar over a fixed trajectory immediately revealed a clean **multi-modal
 
 A Gaussian Mixture Model on a tiny hand-crafted feature confirmed the idea. From a short window of a time series $x(t)$, we summarize the temporal-difference transform
 
-$$f(x_t) = \lvert x(t+1) - x(t) \rvert$$
+$$
+f(x_t) = \lvert x(t+1) - x(t) \rvert
+$$
 
 with `[max; std]`. On 30 windows (10 points each), the GMM clustered **70%** correctly — and the misses were dynamic samples genuinely indistinguishable from static ones in this embedding. If a 2-D hand-crafted feature gets us this far, a learned representation should solve the full task.
 
